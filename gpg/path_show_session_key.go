@@ -151,7 +151,7 @@ func showSessionKeyOne(keyring openpgp.EntityList, ciphertext, format string) (s
 	for {
 		p, err := packet.Read(ciphertextDecoder)
 		if err == io.EOF {
-			//nolint:ST1005 // capitalization matches the original upstream error string; changing it would break callers
+			//nolint:staticcheck // ST1005: capitalization matches the original upstream error string; changing it would break callers
 			return "", decryptSoftErr{fmt.Errorf("Unable to decrypt session key")}
 		}
 		if err != nil {
