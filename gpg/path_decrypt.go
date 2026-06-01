@@ -119,11 +119,11 @@ func (b *backend) pathDecryptWrite(ctx context.Context, req *logical.Request, da
 
 	plaintext, err := decryptOne(keyring, data.Get("ciphertext").(string), format, signerKey != "")
 	if err != nil {
-		switch err.(type) {
+		switch e := err.(type) {
 		case decryptInternalErr:
-			return nil, err.(decryptInternalErr).error
+			return nil, e.error
 		case decryptSoftErr:
-			return logical.ErrorResponse(err.Error()), nil
+			return logical.ErrorResponse(e.Error()), nil
 		default:
 			return logical.ErrorResponse(err.Error()), logical.ErrInvalidRequest
 		}

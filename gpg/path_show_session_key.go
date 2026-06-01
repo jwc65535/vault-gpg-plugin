@@ -119,9 +119,9 @@ func (b *backend) pathShowSessionKeyWrite(ctx context.Context, req *logical.Requ
 
 	sk, err := showSessionKeyOne(keyring, data.Get("ciphertext").(string), format)
 	if err != nil {
-		switch err.(type) {
+		switch e := err.(type) {
 		case decryptSoftErr:
-			return logical.ErrorResponse(err.Error()), nil
+			return logical.ErrorResponse(e.Error()), nil
 		default:
 			return logical.ErrorResponse(err.Error()), logical.ErrInvalidRequest
 		}
