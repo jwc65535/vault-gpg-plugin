@@ -48,6 +48,10 @@ Defaults to "sha2-256".`,
 				Default:     "base64",
 				Description: `Encoding format to use. Can be "base64" or "ascii-armor". Defaults to "base64".`,
 			},
+			"batch_input": {
+				Type:        framework.TypeSlice,
+				Description: "Optional list of items for batch signing. Each item must contain an \"input\" key with a base64-encoded value. When present, returns \"batch_results\" instead of a single \"signature\".",
+			},
 		},
 		Operations: map[logical.Operation]framework.OperationHandler{
 			logical.UpdateOperation: &framework.PathOperation{
@@ -79,6 +83,10 @@ func pathVerify(b *backend) *framework.Path {
 				Type:        framework.TypeString,
 				Default:     "base64",
 				Description: `Encoding format the signature use. Can be "base64" or "ascii-armor". Defaults to "base64".`,
+			},
+			"batch_input": {
+				Type:        framework.TypeSlice,
+				Description: "Optional list of items for batch verification. Each item must contain \"input\" (base64-encoded data) and \"signature\" keys. When present, returns \"batch_results\" instead of a single \"valid\".",
 			},
 		},
 		Operations: map[logical.Operation]framework.OperationHandler{
@@ -137,12 +145,52 @@ func (b *backend) pathSignWrite(ctx context.Context, req *logical.Request, data 
 		return nil, err
 	}
 
-	message := bytes.NewReader(input)
+	if rawBatch, ok := data.GetOk("batch_input"); ok {
+		items := rawBatch.([]interface{})
+		results := make([]map[string]interface{}, len(items))
+		for i, raw := range items {
+			item, ok := raw.(map[string]interface{})
+			if !ok {
+				results[i] = map[string]interface{}{"error": "invalid item format"}
+				continue
+			}
+			inputB64, ok := item["input"].(string)
+			if !ok {
+				results[i] = map[string]interface{}{"error": "missing or invalid input"}
+				continue
+			}
+			itemInput, err := base64.StdEncoding.DecodeString(inputB64)
+			if err != nil {
+				results[i] = map[string]interface{}{"error": fmt.Sprintf("unable to decode input as base64: %s", err)}
+				continue
+			}
+			sig, err := signOne(entity, itemInput, config, format)
+			if err != nil {
+				results[i] = map[string]interface{}{"error": err.Error()}
+				continue
+			}
+			results[i] = map[string]interface{}{"signature": sig}
+		}
+		return &logical.Response{Data: map[string]interface{}{"batch_results": results}}, nil
+	}
 
-	var armoredSignatureBuffer bytes.Buffer
-	err = openpgp.ArmoredDetachSign(&armoredSignatureBuffer, entity, message, &config)
+	sig, err := signOne(entity, input, config, format)
 	if err != nil {
 		return nil, err
+	}
+
+	return &logical.Response{
+		Data: map[string]interface{}{
+			"signature": sig,
+		},
+	}, nil
+}
+
+func signOne(entity *openpgp.Entity, input []byte, config packet.Config, format string) (string, error) {
+	var armoredSignatureBuffer bytes.Buffer
+	err := openpgp.ArmoredDetachSign(&armoredSignatureBuffer, entity, bytes.NewReader(input), &config)
+	if err != nil {
+		return "", err
 	}
 
 	var outputSignature bytes.Buffer
@@ -152,30 +200,26 @@ func (b *backend) pathSignWrite(ctx context.Context, req *logical.Request, data 
 	case "base64":
 		block, err := armor.Decode(bytes.NewReader(armoredSignatureBuffer.Bytes()))
 		if err != nil {
-			return nil, err
+			return "", err
 		}
 
 		encoder := base64.NewEncoder(base64.StdEncoding, &outputSignature)
 		bufBody := &bytes.Buffer{}
 		_, err = bufBody.ReadFrom(block.Body)
 		if err != nil {
-			return nil, err
+			return "", err
 		}
 		_, err = encoder.Write(bufBody.Bytes())
 		if err != nil {
-			return nil, err
+			return "", err
 		}
 		err = encoder.Close()
 		if err != nil {
-			return nil, err
+			return "", err
 		}
 	}
 
-	return &logical.Response{
-		Data: map[string]interface{}{
-			"signature": outputSignature.String(),
-		},
-	}, nil
+	return outputSignature.String(), nil
 }
 
 func (b *backend) pathVerifyWrite(ctx context.Context, req *logical.Request, data *framework.FieldData) (*logical.Response, error) {
@@ -207,23 +251,54 @@ func (b *backend) pathVerifyWrite(ctx context.Context, req *logical.Request, dat
 		return nil, err
 	}
 
-	signature := strings.NewReader(data.Get("signature").(string))
+	if rawBatch, ok := data.GetOk("batch_input"); ok {
+		items := rawBatch.([]interface{})
+		results := make([]map[string]interface{}, len(items))
+		for i, raw := range items {
+			item, ok := raw.(map[string]interface{})
+			if !ok {
+				results[i] = map[string]interface{}{"error": "invalid item format"}
+				continue
+			}
+			inputB64, ok := item["input"].(string)
+			if !ok {
+				results[i] = map[string]interface{}{"error": "missing or invalid input"}
+				continue
+			}
+			itemInput, err := base64.StdEncoding.DecodeString(inputB64)
+			if err != nil {
+				results[i] = map[string]interface{}{"error": fmt.Sprintf("unable to decode input as base64: %s", err)}
+				continue
+			}
+			sig, ok := item["signature"].(string)
+			if !ok {
+				results[i] = map[string]interface{}{"error": "missing or invalid signature"}
+				continue
+			}
+			results[i] = map[string]interface{}{"valid": verifyOne(keyring, itemInput, sig, format)}
+		}
+		return &logical.Response{Data: map[string]interface{}{"batch_results": results}}, nil
+	}
+
+	return &logical.Response{
+		Data: map[string]interface{}{
+			"valid": verifyOne(keyring, input, data.Get("signature").(string), format),
+		},
+	}, nil
+}
+
+func verifyOne(keyring openpgp.EntityList, input []byte, signature, format string) bool {
+	sig := strings.NewReader(signature)
 	message := bytes.NewReader(input)
+	var err error
 	switch format {
 	case "base64":
-		decoder := base64.NewDecoder(base64.StdEncoding, signature)
+		decoder := base64.NewDecoder(base64.StdEncoding, sig)
 		_, err = openpgp.CheckDetachedSignature(keyring, message, decoder, nil)
 	case "ascii-armor":
-		_, err = openpgp.CheckArmoredDetachedSignature(keyring, message, signature, nil)
+		_, err = openpgp.CheckArmoredDetachedSignature(keyring, message, sig, nil)
 	}
-
-	resp := &logical.Response{
-		Data: map[string]interface{}{
-			"valid": err == nil,
-		},
-	}
-
-	return resp, nil
+	return err == nil
 }
 
 const pathSignHelpSyn = "Generate a signature for input data using the named GPG key"

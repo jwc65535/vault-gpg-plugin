@@ -37,6 +37,10 @@ func pathShowSessionKey(b *backend) *framework.Path {
 				Type:        framework.TypeString,
 				Description: "The ASCII-armored GPG key of the signer of the ciphertext. If present, the signature must be valid.",
 			},
+			"batch_input": {
+				Type:        framework.TypeSlice,
+				Description: "Optional list of items for batch session key extraction. Each item must contain a \"ciphertext\" key and may contain an optional \"signer_key\" (ASCII-armored public key). When present, returns \"batch_results\" instead of a single \"session_key\".",
+			},
 		},
 		Operations: map[logical.Operation]framework.OperationHandler{
 			logical.UpdateOperation: &framework.PathOperation{
@@ -71,6 +75,39 @@ func (b *backend) pathShowSessionKeyWrite(ctx context.Context, req *logical.Requ
 		return nil, err
 	}
 
+	if rawBatch, ok := data.GetOk("batch_input"); ok {
+		items := rawBatch.([]interface{})
+		results := make([]map[string]interface{}, len(items))
+		for i, raw := range items {
+			item, ok := raw.(map[string]interface{})
+			if !ok {
+				results[i] = map[string]interface{}{"error": "invalid item format"}
+				continue
+			}
+			ciphertext, ok := item["ciphertext"].(string)
+			if !ok {
+				results[i] = map[string]interface{}{"error": "missing or invalid ciphertext"}
+				continue
+			}
+			itemKeyring := keyring
+			if sk, ok := item["signer_key"].(string); ok && sk != "" {
+				el, err := openpgp.ReadArmoredKeyRing(strings.NewReader(sk))
+				if err != nil {
+					results[i] = map[string]interface{}{"error": err.Error()}
+					continue
+				}
+				itemKeyring = append(append(openpgp.EntityList{}, keyring...), el[0])
+			}
+			sk, err := showSessionKeyOne(itemKeyring, ciphertext, format)
+			if err != nil {
+				results[i] = map[string]interface{}{"error": err.Error()}
+				continue
+			}
+			results[i] = map[string]interface{}{"session_key": sk}
+		}
+		return &logical.Response{Data: map[string]interface{}{"batch_results": results}}, nil
+	}
+
 	signerKey := data.Get("signer_key").(string)
 	if signerKey != "" {
 		el, err := openpgp.ReadArmoredKeyRing(strings.NewReader(signerKey))
@@ -80,7 +117,25 @@ func (b *backend) pathShowSessionKeyWrite(ctx context.Context, req *logical.Requ
 		keyring = append(keyring, el[0])
 	}
 
-	ciphertextEncoded := strings.NewReader(data.Get("ciphertext").(string))
+	sk, err := showSessionKeyOne(keyring, data.Get("ciphertext").(string), format)
+	if err != nil {
+		switch err.(type) {
+		case decryptSoftErr:
+			return logical.ErrorResponse(err.Error()), nil
+		default:
+			return logical.ErrorResponse(err.Error()), logical.ErrInvalidRequest
+		}
+	}
+
+	return &logical.Response{
+		Data: map[string]interface{}{
+			"session_key": sk,
+		},
+	}, nil
+}
+
+func showSessionKeyOne(keyring openpgp.EntityList, ciphertext, format string) (string, error) {
+	ciphertextEncoded := strings.NewReader(ciphertext)
 	var ciphertextDecoder io.Reader
 	switch format {
 	case "base64":
@@ -88,20 +143,18 @@ func (b *backend) pathShowSessionKeyWrite(ctx context.Context, req *logical.Requ
 	case "ascii-armor":
 		block, err := armor.Decode(ciphertextEncoded)
 		if err != nil {
-			return logical.ErrorResponse(err.Error()), logical.ErrInvalidRequest
+			return "", err
 		}
 		ciphertextDecoder = block.Body
 	}
 
-	var p packet.Packet
-	var sessionKey string
 	for {
-		p, err = packet.Read(ciphertextDecoder)
+		p, err := packet.Read(ciphertextDecoder)
 		if err == io.EOF {
-			return logical.ErrorResponse("Unable to decrypt session key"), nil
+			return "", decryptSoftErr{fmt.Errorf("Unable to decrypt session key")}
 		}
 		if err != nil {
-			return logical.ErrorResponse(err.Error()), logical.ErrInvalidRequest
+			return "", err
 		}
 		switch p := p.(type) {
 		case *packet.EncryptedKey:
@@ -109,14 +162,8 @@ func (b *backend) pathShowSessionKeyWrite(ctx context.Context, req *logical.Requ
 			keys := keyring.KeysById(encryptedKey.KeyId)
 			for _, key := range keys {
 				encryptedKey.Decrypt(key.PrivateKey, nil)
-
 				if len(encryptedKey.Key) > 0 {
-					sessionKey = fmt.Sprintf("%d:%s", encryptedKey.CipherFunc, strings.ToUpper(hex.EncodeToString(encryptedKey.Key)))
-					return &logical.Response{
-						Data: map[string]interface{}{
-							"session_key": sessionKey,
-						},
-					}, nil
+					return fmt.Sprintf("%d:%s", encryptedKey.CipherFunc, strings.ToUpper(hex.EncodeToString(encryptedKey.Key))), nil
 				}
 			}
 		}

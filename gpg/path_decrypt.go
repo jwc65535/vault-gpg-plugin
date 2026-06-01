@@ -35,6 +35,10 @@ func pathDecrypt(b *backend) *framework.Path {
 				Type:        framework.TypeString,
 				Description: "The ASCII-armored GPG key of the signer of the ciphertext. If present, the signature must be valid.",
 			},
+			"batch_input": {
+				Type:        framework.TypeSlice,
+				Description: "Optional list of items for batch decryption. Each item must contain a \"ciphertext\" key and may contain an optional \"signer_key\" (ASCII-armored public key). When present, returns \"batch_results\" instead of a single \"plaintext\".",
+			},
 		},
 		Operations: map[logical.Operation]framework.OperationHandler{
 			logical.UpdateOperation: &framework.PathOperation{
@@ -69,6 +73,41 @@ func (b *backend) pathDecryptWrite(ctx context.Context, req *logical.Request, da
 		return nil, err
 	}
 
+	if rawBatch, ok := data.GetOk("batch_input"); ok {
+		items := rawBatch.([]interface{})
+		results := make([]map[string]interface{}, len(items))
+		for i, raw := range items {
+			item, ok := raw.(map[string]interface{})
+			if !ok {
+				results[i] = map[string]interface{}{"error": "invalid item format"}
+				continue
+			}
+			ciphertext, ok := item["ciphertext"].(string)
+			if !ok {
+				results[i] = map[string]interface{}{"error": "missing or invalid ciphertext"}
+				continue
+			}
+			itemKeyring := keyring
+			requireSignature := false
+			if sk, ok := item["signer_key"].(string); ok && sk != "" {
+				el, err := openpgp.ReadArmoredKeyRing(strings.NewReader(sk))
+				if err != nil {
+					results[i] = map[string]interface{}{"error": err.Error()}
+					continue
+				}
+				itemKeyring = append(append(openpgp.EntityList{}, keyring...), el[0])
+				requireSignature = true
+			}
+			plaintext, err := decryptOne(itemKeyring, ciphertext, format, requireSignature)
+			if err != nil {
+				results[i] = map[string]interface{}{"error": err.Error()}
+				continue
+			}
+			results[i] = map[string]interface{}{"plaintext": plaintext}
+		}
+		return &logical.Response{Data: map[string]interface{}{"batch_results": results}}, nil
+	}
+
 	signerKey := data.Get("signer_key").(string)
 	if signerKey != "" {
 		el, err := openpgp.ReadArmoredKeyRing(strings.NewReader(signerKey))
@@ -78,7 +117,35 @@ func (b *backend) pathDecryptWrite(ctx context.Context, req *logical.Request, da
 		keyring = append(keyring, el[0])
 	}
 
-	ciphertextEncoded := strings.NewReader(data.Get("ciphertext").(string))
+	plaintext, err := decryptOne(keyring, data.Get("ciphertext").(string), format, signerKey != "")
+	if err != nil {
+		switch err.(type) {
+		case decryptInternalErr:
+			return nil, err.(decryptInternalErr).error
+		case decryptSoftErr:
+			return logical.ErrorResponse(err.Error()), nil
+		default:
+			return logical.ErrorResponse(err.Error()), logical.ErrInvalidRequest
+		}
+	}
+
+	return &logical.Response{
+		Data: map[string]interface{}{
+			"plaintext": plaintext,
+		},
+	}, nil
+}
+
+// decryptInternalErr wraps errors that should surface as 500 (unexpected I/O
+// failures on the already-decrypted body, matching the original handler behaviour).
+type decryptInternalErr struct{ error }
+
+// decryptSoftErr wraps errors that should produce a 400 with a nil second
+// return value (signature validation failure, matching the original handler).
+type decryptSoftErr struct{ error }
+
+func decryptOne(keyring openpgp.EntityList, ciphertext, format string, requireSignature bool) (string, error) {
+	ciphertextEncoded := strings.NewReader(ciphertext)
 	var ciphertextDecoder io.Reader
 	switch format {
 	case "base64":
@@ -86,34 +153,30 @@ func (b *backend) pathDecryptWrite(ctx context.Context, req *logical.Request, da
 	case "ascii-armor":
 		block, err := armor.Decode(ciphertextEncoded)
 		if err != nil {
-			return logical.ErrorResponse(err.Error()), logical.ErrInvalidRequest
+			return "", err
 		}
 		ciphertextDecoder = block.Body
 	}
 
 	md, err := openpgp.ReadMessage(ciphertextDecoder, keyring, nil, nil)
 	if err != nil {
-		return logical.ErrorResponse(err.Error()), logical.ErrInvalidRequest
+		return "", err
 	}
 
 	var plaintext bytes.Buffer
 	w := base64.NewEncoder(base64.StdEncoding, &plaintext)
 	if _, err = io.Copy(w, md.UnverifiedBody); err != nil {
-		return nil, err
+		return "", decryptInternalErr{err}
 	}
 	if err = w.Close(); err != nil {
-		return nil, err
+		return "", decryptInternalErr{err}
 	}
 
-	if signerKey != "" && (!md.IsSigned || md.SignedBy == nil || md.SignatureError != nil) {
-		return logical.ErrorResponse("Signature is invalid or not present: %s", md.SignatureError), nil
+	if requireSignature && (!md.IsSigned || md.SignedBy == nil || md.SignatureError != nil) {
+		return "", decryptSoftErr{fmt.Errorf("Signature is invalid or not present: %s", md.SignatureError)}
 	}
 
-	return &logical.Response{
-		Data: map[string]interface{}{
-			"plaintext": plaintext.String(),
-		},
-	}, nil
+	return plaintext.String(), nil
 }
 
 const pathDecryptHelpSyn = "Decrypt a ciphertext value using a named GPG key"

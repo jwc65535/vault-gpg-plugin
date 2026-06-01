@@ -135,6 +135,323 @@ func TestGPG_ShowSessionKeyError(t *testing.T) {
 	showSessionKeyMustFail("test", encryptedSessionMessageASCIIArmored, "ascii-armor", "Signer key is not ASCII armored")
 }
 
+func TestGPG_ShowSessionKeyBatch_Success(t *testing.T) {
+	storage := &logical.InmemStorage{}
+	b := Backend()
+
+	_, err := b.HandleRequest(context.Background(), &logical.Request{
+		Storage:   storage,
+		Operation: logical.UpdateOperation,
+		Path:      "keys/test",
+		Data:      map[string]interface{}{"generate": false, "key": privateSessionDecryptKey},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	resp, err := b.HandleRequest(context.Background(), &logical.Request{
+		Storage:   storage,
+		Operation: logical.UpdateOperation,
+		Path:      "show-session-key/test",
+		Data: map[string]interface{}{
+			"format": "ascii-armor",
+			"batch_input": []interface{}{
+				map[string]interface{}{"ciphertext": encryptedSessionMessageASCIIArmored},
+				map[string]interface{}{"ciphertext": encryptedAndSignedSessionMessageASCIIArmored, "signer_key": publicSessionSignerKey},
+			},
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if resp.IsError() {
+		t.Fatalf("expected no error response, got: %v", resp)
+	}
+
+	batchResults, ok := resp.Data["batch_results"].([]map[string]interface{})
+	if !ok {
+		t.Fatalf("expected batch_results to be []map[string]interface{}, got %T: %v", resp.Data["batch_results"], resp.Data["batch_results"])
+	}
+	if len(batchResults) != 2 {
+		t.Fatalf("expected 2 batch results, got %d", len(batchResults))
+	}
+
+	expected := []string{
+		"9:BDF8F7A2A573556C1E7D2FE9ADDCA7188C451C60B5311025F2A900E9FC61809E",
+		"9:E82F18EF202C2356CB758B56B79D4F4CCAD6CC21FDFBB6867FCFAC25BC10863C",
+	}
+	for i, result := range batchResults {
+		if _, hasError := result["error"]; hasError {
+			t.Errorf("item %d: unexpected error: %v", i, result["error"])
+		}
+		sk, ok := result["session_key"].(string)
+		if !ok {
+			t.Errorf("item %d: missing session_key", i)
+		} else if sk != expected[i] {
+			t.Errorf("item %d: expected session_key %q, got %q", i, expected[i], sk)
+		}
+	}
+}
+
+func TestGPG_ShowSessionKeyBatch_Base64Format(t *testing.T) {
+	storage := &logical.InmemStorage{}
+	b := Backend()
+
+	_, err := b.HandleRequest(context.Background(), &logical.Request{
+		Storage:   storage,
+		Operation: logical.UpdateOperation,
+		Path:      "keys/test",
+		Data:      map[string]interface{}{"generate": false, "key": privateSessionDecryptKey},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	resp, err := b.HandleRequest(context.Background(), &logical.Request{
+		Storage:   storage,
+		Operation: logical.UpdateOperation,
+		Path:      "show-session-key/test",
+		Data: map[string]interface{}{
+			"format": "base64",
+			"batch_input": []interface{}{
+				map[string]interface{}{"ciphertext": encryptedSessionMessageBase64Encoded},
+				map[string]interface{}{"ciphertext": encryptedSessionMessageBase64EncodedWithMultipleKeys},
+			},
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if resp.IsError() {
+		t.Fatalf("expected no error response, got: %v", resp)
+	}
+
+	batchResults, ok := resp.Data["batch_results"].([]map[string]interface{})
+	if !ok {
+		t.Fatalf("expected batch_results to be []map[string]interface{}, got %T", resp.Data["batch_results"])
+	}
+	if len(batchResults) != 2 {
+		t.Fatalf("expected 2 batch results, got %d", len(batchResults))
+	}
+
+	expected := []string{
+		"9:EC211D19FA4FFC7F88B6AC6A1112C88032910753AB52FEF10C71D850A721151C",
+		"9:F8054D6D0F6E9C89155B829BC71E0613472EA70E32B9DA7893960536B04BB2BD",
+	}
+	for i, result := range batchResults {
+		if _, hasError := result["error"]; hasError {
+			t.Errorf("item %d: unexpected error: %v", i, result["error"])
+		}
+		sk, ok := result["session_key"].(string)
+		if !ok {
+			t.Errorf("item %d: missing session_key", i)
+		} else if sk != expected[i] {
+			t.Errorf("item %d: expected session_key %q, got %q", i, expected[i], sk)
+		}
+	}
+}
+
+func TestGPG_ShowSessionKeyBatch_PartialError(t *testing.T) {
+	storage := &logical.InmemStorage{}
+	b := Backend()
+
+	_, err := b.HandleRequest(context.Background(), &logical.Request{
+		Storage:   storage,
+		Operation: logical.UpdateOperation,
+		Path:      "keys/test",
+		Data:      map[string]interface{}{"generate": false, "key": privateSessionDecryptKey},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	resp, err := b.HandleRequest(context.Background(), &logical.Request{
+		Storage:   storage,
+		Operation: logical.UpdateOperation,
+		Path:      "show-session-key/test",
+		Data: map[string]interface{}{
+			"format": "ascii-armor",
+			"batch_input": []interface{}{
+				map[string]interface{}{"ciphertext": encryptedSessionMessageASCIIArmored},
+				map[string]interface{}{"ciphertext": encryptedSessionMessageASCIIArmored[:128]},
+				map[string]interface{}{"ciphertext": encryptedSessionMessageASCIIArmored},
+			},
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if resp.IsError() {
+		t.Fatalf("expected no error response, got: %v", resp)
+	}
+
+	batchResults, ok := resp.Data["batch_results"].([]map[string]interface{})
+	if !ok {
+		t.Fatalf("expected batch_results to be []map[string]interface{}, got %T", resp.Data["batch_results"])
+	}
+	if len(batchResults) != 3 {
+		t.Fatalf("expected 3 batch results, got %d", len(batchResults))
+	}
+	for _, i := range []int{0, 2} {
+		if _, hasError := batchResults[i]["error"]; hasError {
+			t.Errorf("item %d: unexpected error: %v", i, batchResults[i]["error"])
+		}
+		if _, hasSK := batchResults[i]["session_key"]; !hasSK {
+			t.Errorf("item %d: missing session_key", i)
+		}
+	}
+	if _, hasError := batchResults[1]["error"]; !hasError {
+		t.Errorf("item 1: expected error for truncated ciphertext, got: %v", batchResults[1])
+	}
+	if _, hasSK := batchResults[1]["session_key"]; hasSK {
+		t.Errorf("item 1: unexpected session_key present")
+	}
+}
+
+func TestGPG_ShowSessionKeyBatch_MissingCiphertext(t *testing.T) {
+	storage := &logical.InmemStorage{}
+	b := Backend()
+
+	_, err := b.HandleRequest(context.Background(), &logical.Request{
+		Storage:   storage,
+		Operation: logical.UpdateOperation,
+		Path:      "keys/test",
+		Data:      map[string]interface{}{"generate": false, "key": privateSessionDecryptKey},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	resp, err := b.HandleRequest(context.Background(), &logical.Request{
+		Storage:   storage,
+		Operation: logical.UpdateOperation,
+		Path:      "show-session-key/test",
+		Data: map[string]interface{}{
+			"format": "ascii-armor",
+			"batch_input": []interface{}{
+				map[string]interface{}{}, // no "ciphertext" key
+			},
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if resp.IsError() {
+		t.Fatalf("expected no error response, got: %v", resp)
+	}
+
+	batchResults, ok := resp.Data["batch_results"].([]map[string]interface{})
+	if !ok {
+		t.Fatalf("expected batch_results to be []map[string]interface{}, got %T", resp.Data["batch_results"])
+	}
+	if len(batchResults) != 1 {
+		t.Fatalf("expected 1 batch result, got %d", len(batchResults))
+	}
+	if _, hasError := batchResults[0]["error"]; !hasError {
+		t.Errorf("item 0: expected error for missing ciphertext, got: %v", batchResults[0])
+	}
+}
+
+func TestGPG_ShowSessionKeyBatch_Empty(t *testing.T) {
+	storage := &logical.InmemStorage{}
+	b := Backend()
+
+	_, err := b.HandleRequest(context.Background(), &logical.Request{
+		Storage:   storage,
+		Operation: logical.UpdateOperation,
+		Path:      "keys/test",
+		Data:      map[string]interface{}{"generate": false, "key": privateSessionDecryptKey},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	resp, err := b.HandleRequest(context.Background(), &logical.Request{
+		Storage:   storage,
+		Operation: logical.UpdateOperation,
+		Path:      "show-session-key/test",
+		Data: map[string]interface{}{
+			"format":      "ascii-armor",
+			"batch_input": []interface{}{},
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if resp.IsError() {
+		t.Fatalf("expected no error response, got: %v", resp)
+	}
+
+	batchResults, ok := resp.Data["batch_results"].([]map[string]interface{})
+	if !ok {
+		t.Fatalf("expected batch_results to be []map[string]interface{}, got %T: %v", resp.Data["batch_results"], resp.Data["batch_results"])
+	}
+	if len(batchResults) != 0 {
+		t.Fatalf("expected 0 batch results, got %d", len(batchResults))
+	}
+}
+
+func TestGPG_ShowSessionKeyBatch_RequestLevelBadFormat(t *testing.T) {
+	storage := &logical.InmemStorage{}
+	b := Backend()
+
+	_, err := b.HandleRequest(context.Background(), &logical.Request{
+		Storage:   storage,
+		Operation: logical.UpdateOperation,
+		Path:      "keys/test",
+		Data:      map[string]interface{}{"generate": false, "key": privateSessionDecryptKey},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	resp, err := b.HandleRequest(context.Background(), &logical.Request{
+		Storage:   storage,
+		Operation: logical.UpdateOperation,
+		Path:      "show-session-key/test",
+		Data: map[string]interface{}{
+			"format": "notexisting",
+			"batch_input": []interface{}{
+				map[string]interface{}{"ciphertext": encryptedSessionMessageASCIIArmored},
+			},
+		},
+	})
+	if err != nil && err != logical.ErrInvalidRequest {
+		t.Fatal(err)
+	}
+	if resp == nil || !resp.IsError() {
+		t.Fatalf("expected error response, got: %v", resp)
+	}
+	if _, hasBatch := resp.Data["batch_results"]; hasBatch {
+		t.Errorf("expected no batch_results in error response")
+	}
+}
+
+func TestGPG_ShowSessionKeyBatch_RequestLevelUnknownKey(t *testing.T) {
+	storage := &logical.InmemStorage{}
+	b := Backend()
+
+	resp, err := b.HandleRequest(context.Background(), &logical.Request{
+		Storage:   storage,
+		Operation: logical.UpdateOperation,
+		Path:      "show-session-key/doesnotexist",
+		Data: map[string]interface{}{
+			"batch_input": []interface{}{
+				map[string]interface{}{"ciphertext": encryptedSessionMessageASCIIArmored},
+			},
+		},
+	})
+	if err != nil && err != logical.ErrInvalidRequest {
+		t.Fatal(err)
+	}
+	if resp == nil || !resp.IsError() {
+		t.Fatalf("expected error response, got: %v", resp)
+	}
+	if _, hasBatch := resp.Data["batch_results"]; hasBatch {
+		t.Errorf("expected no batch_results in error response")
+	}
+}
+
 //nolint:gosec
 const privateSessionDecryptKey = `-----BEGIN PGP PRIVATE KEY BLOCK-----
 

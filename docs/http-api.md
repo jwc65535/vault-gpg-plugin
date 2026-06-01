@@ -263,6 +263,60 @@ $ curl \
 }
 ```
 
+### Batch Usage
+
+This endpoint also accepts a `batch_input` array for processing multiple items in a single request.
+
+Top-level `algorithm` and `format` apply to all items in the batch.
+
+#### `batch_input` item fields
+
+| Field   | Type             | Required | Description |
+| :------ | :--------------- | :------- | :---------- |
+| `input` | `string` | yes | Base64-encoded data to sign |
+
+#### `batch_results` item fields
+
+On success:
+
+| Field       | Type     | Description |
+| :---------- | :------- | :---------- |
+| `signature` | `string` | Signature in the top-level `format` encoding |
+
+On failure:
+
+| Field   | Type     | Description |
+| :------ | :------- | :---------- |
+| `error` | `string` | Human-readable error message for this item |
+
+#### Sample batch payload
+
+```json
+{
+  "algorithm": "sha2-256",
+  "format": "base64",
+  "batch_input": [
+    { "input": "dGhlIHF1aWNrIGJyb3duIGZveA==" },
+    { "input": "aGVsbG8gd29ybGQ=" },
+    { "input": "!!not-base64!!" }
+  ]
+}
+```
+
+#### Sample batch response
+
+```json
+{
+  "data": {
+    "batch_results": [
+      { "signature": "wsBc..." },
+      { "signature": "wsBc..." },
+      { "error": "unable to decode input as base64: illegal base64 data at input byte 0" }
+    ]
+  }
+}
+```
+
 ## Verify Signed Data
 
 
@@ -313,6 +367,60 @@ $ curl \
 {
   "data": {
     "valid": true
+  }
+}
+```
+
+### Batch Usage
+
+This endpoint also accepts a `batch_input` array for processing multiple items in a single request.
+
+The top-level `format` applies to all items. An invalid signature produces `"valid": false` — it is never reported as an `"error"`.
+
+#### `batch_input` item fields
+
+| Field       | Type     | Required | Description |
+| :---------- | :------- | :------- | :---------- |
+| `input`     | `string` | yes | Base64-encoded data that was signed |
+| `signature` | `string` | yes | Signature to verify (encoding must match top-level `format`) |
+
+#### `batch_results` item fields
+
+On success:
+
+| Field   | Type   | Description |
+| :------ | :----- | :---------- |
+| `valid` | `bool` | `true` if the signature is valid, `false` otherwise |
+
+On failure (structural error only — invalid signatures use `valid: false`):
+
+| Field   | Type     | Description |
+| :------ | :------- | :---------- |
+| `error` | `string` | Human-readable error message for this item |
+
+#### Sample batch payload
+
+```json
+{
+  "format": "base64",
+  "batch_input": [
+    { "input": "dGhlIHF1aWNrIGJyb3duIGZveA==", "signature": "wsBc..." },
+    { "input": "aGVsbG8gd29ybGQ=",             "signature": "wsBc..." },
+    { "input": "!!not-base64!!" ,               "signature": "wsBc..." }
+  ]
+}
+```
+
+#### Sample batch response
+
+```json
+{
+  "data": {
+    "batch_results": [
+      { "valid": true  },
+      { "valid": false },
+      { "error": "unable to decode input as base64: illegal base64 data at input byte 0" }
+    ]
   }
 }
 ```
@@ -368,6 +476,61 @@ $ curl \
 }
 ```
 
+### Batch Usage
+
+This endpoint also accepts a `batch_input` array for processing multiple items in a single request.
+
+The top-level `format` applies to all items. Each item may provide its own `signer_key`; the base decryption key is always taken from the URL path.
+
+#### `batch_input` item fields
+
+| Field       | Type     | Required | Description |
+| :---------- | :------- | :------- | :---------- |
+| `ciphertext` | `string` | yes | Ciphertext to decrypt (encoding must match top-level `format`) |
+| `signer_key` | `string` | no  | ASCII-armored public key of the expected signer; if present, the signature must be valid |
+
+#### `batch_results` item fields
+
+On success:
+
+| Field       | Type     | Description |
+| :---------- | :------- | :---------- |
+| `plaintext` | `string` | Base64-encoded decrypted plaintext |
+
+On failure:
+
+| Field   | Type     | Description |
+| :------ | :------- | :---------- |
+| `error` | `string` | Human-readable error message for this item |
+
+#### Sample batch payload
+
+```json
+{
+  "format": "ascii-armor",
+  "batch_input": [
+    { "ciphertext": "-----BEGIN PGP MESSAGE-----\n...\n-----END PGP MESSAGE-----" },
+    { "ciphertext": "-----BEGIN PGP MESSAGE-----\n...\n-----END PGP MESSAGE-----",
+      "signer_key": "-----BEGIN PGP PUBLIC KEY BLOCK-----\n..." },
+    { "ciphertext": "this is not valid armor" }
+  ]
+}
+```
+
+#### Sample batch response
+
+```json
+{
+  "data": {
+    "batch_results": [
+      { "plaintext": "SGVsbG8gV29ybGQh" },
+      { "plaintext": "SGVsbG8gV29ybGQh" },
+      { "error": "EOF" }
+    ]
+  }
+}
+```
+
 ## Show Session Key
 
 This endpoint decrypts and returns the session key of the provided ciphertext using the named GPG key.
@@ -414,6 +577,60 @@ $ curl \
 {
   "data": {
     "session_key": "9:720D9B92D50D4F7C404C8C412BEB73B47E0A2FA2E822C13201A79D5A2694F9F5"
+  }
+}
+```
+
+### Batch Usage
+
+This endpoint also accepts a `batch_input` array for processing multiple items in a single request.
+
+The top-level `format` applies to all items. Each item may provide its own `signer_key`.
+
+#### `batch_input` item fields
+
+| Field        | Type     | Required | Description |
+| :----------- | :------- | :------- | :---------- |
+| `ciphertext` | `string` | yes | Ciphertext whose session key to extract (encoding must match top-level `format`) |
+| `signer_key` | `string` | no  | ASCII-armored public key of the expected signer |
+
+#### `batch_results` item fields
+
+On success:
+
+| Field         | Type     | Description |
+| :------------ | :------- | :---------- |
+| `session_key` | `string` | Session key in `<cipher-algo-id>:<uppercase-hex>` format |
+
+On failure:
+
+| Field   | Type     | Description |
+| :------ | :------- | :---------- |
+| `error` | `string` | Human-readable error message for this item |
+
+#### Sample batch payload
+
+```json
+{
+  "format": "ascii-armor",
+  "batch_input": [
+    { "ciphertext": "-----BEGIN PGP MESSAGE-----\n...\n-----END PGP MESSAGE-----" },
+    { "ciphertext": "-----BEGIN PGP MESSAGE-----\n...\n-----END PGP MESSAGE-----" },
+    { "ciphertext": "this is not valid armor" }
+  ]
+}
+```
+
+#### Sample batch response
+
+```json
+{
+  "data": {
+    "batch_results": [
+      { "session_key": "9:720D9B92D50D4F7C404C8C412BEB73B47E0A2FA2E822C13201A79D5A2694F9F5" },
+      { "session_key": "9:BDF8F7A2A573556C1E7D2FE9ADDCA7188C451C60B5311025F2A900E9FC61809E" },
+      { "error": "EOF" }
+    ]
   }
 }
 ```

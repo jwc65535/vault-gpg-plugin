@@ -249,3 +249,354 @@ fSxDoJ8zTa5e+MEbyEIS5WI3VW8T46Qa3Rg1IsfOhBPeQBdtPcvad1nsuNVkieMp
 S4KHrrIA2G+eVRFHdFyX0rCImsjynuzqOqWLfmD7J32I77xQgYVsnqFE1Q==
 =bD+C
 -----END PGP MESSAGE-----`
+
+func TestGPG_DecryptBatch_Success(t *testing.T) {
+	storage := &logical.InmemStorage{}
+	b := Backend()
+
+	_, err := b.HandleRequest(context.Background(), &logical.Request{
+		Storage:   storage,
+		Operation: logical.UpdateOperation,
+		Path:      "keys/test",
+		Data:      map[string]interface{}{"generate": false, "key": privateDecryptKey},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	resp, err := b.HandleRequest(context.Background(), &logical.Request{
+		Storage:   storage,
+		Operation: logical.UpdateOperation,
+		Path:      "decrypt/test",
+		Data: map[string]interface{}{
+			"format": "ascii-armor",
+			"batch_input": []interface{}{
+				map[string]interface{}{"ciphertext": encryptedMessageASCIIArmored},
+				map[string]interface{}{"ciphertext": encryptedAndSignedMessageASCIIArmored, "signer_key": publicSignerKey},
+			},
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if resp.IsError() {
+		t.Fatalf("expected no error response, got: %v", resp)
+	}
+
+	batchResults, ok := resp.Data["batch_results"].([]map[string]interface{})
+	if !ok {
+		t.Fatalf("expected batch_results to be []map[string]interface{}, got %T: %v", resp.Data["batch_results"], resp.Data["batch_results"])
+	}
+	if len(batchResults) != 2 {
+		t.Fatalf("expected 2 batch results, got %d", len(batchResults))
+	}
+	for i, result := range batchResults {
+		if _, hasError := result["error"]; hasError {
+			t.Errorf("item %d: unexpected error: %v", i, result["error"])
+		}
+		plaintext, ok := result["plaintext"].(string)
+		if !ok {
+			t.Errorf("item %d: missing plaintext", i)
+		} else if plaintext != "QWxwYWNhcwo=" {
+			t.Errorf("item %d: expected plaintext %q, got %q", i, "QWxwYWNhcwo=", plaintext)
+		}
+	}
+}
+
+func TestGPG_DecryptBatch_Base64Format(t *testing.T) {
+	storage := &logical.InmemStorage{}
+	b := Backend()
+
+	_, err := b.HandleRequest(context.Background(), &logical.Request{
+		Storage:   storage,
+		Operation: logical.UpdateOperation,
+		Path:      "keys/test",
+		Data:      map[string]interface{}{"generate": false, "key": privateDecryptKey},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	resp, err := b.HandleRequest(context.Background(), &logical.Request{
+		Storage:   storage,
+		Operation: logical.UpdateOperation,
+		Path:      "decrypt/test",
+		Data: map[string]interface{}{
+			"format": "base64",
+			"batch_input": []interface{}{
+				map[string]interface{}{"ciphertext": encryptedMessageBase64Encoded},
+			},
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if resp.IsError() {
+		t.Fatalf("expected no error response, got: %v", resp)
+	}
+
+	batchResults, ok := resp.Data["batch_results"].([]map[string]interface{})
+	if !ok {
+		t.Fatalf("expected batch_results to be []map[string]interface{}, got %T", resp.Data["batch_results"])
+	}
+	if len(batchResults) != 1 {
+		t.Fatalf("expected 1 batch result, got %d", len(batchResults))
+	}
+	plaintext, ok := batchResults[0]["plaintext"].(string)
+	if !ok {
+		t.Errorf("item 0: missing plaintext")
+	} else if plaintext != "QWxwYWNhcwo=" {
+		t.Errorf("item 0: expected plaintext %q, got %q", "QWxwYWNhcwo=", plaintext)
+	}
+}
+
+func TestGPG_DecryptBatch_PartialError(t *testing.T) {
+	storage := &logical.InmemStorage{}
+	b := Backend()
+
+	_, err := b.HandleRequest(context.Background(), &logical.Request{
+		Storage:   storage,
+		Operation: logical.UpdateOperation,
+		Path:      "keys/test",
+		Data:      map[string]interface{}{"generate": false, "key": privateDecryptKey},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	resp, err := b.HandleRequest(context.Background(), &logical.Request{
+		Storage:   storage,
+		Operation: logical.UpdateOperation,
+		Path:      "decrypt/test",
+		Data: map[string]interface{}{
+			"format": "ascii-armor",
+			"batch_input": []interface{}{
+				map[string]interface{}{"ciphertext": encryptedMessageASCIIArmored},
+				map[string]interface{}{"ciphertext": "this is not armored"},
+				map[string]interface{}{"ciphertext": encryptedMessageASCIIArmored},
+			},
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if resp.IsError() {
+		t.Fatalf("expected no error response, got: %v", resp)
+	}
+
+	batchResults, ok := resp.Data["batch_results"].([]map[string]interface{})
+	if !ok {
+		t.Fatalf("expected batch_results to be []map[string]interface{}, got %T", resp.Data["batch_results"])
+	}
+	if len(batchResults) != 3 {
+		t.Fatalf("expected 3 batch results, got %d", len(batchResults))
+	}
+	for _, i := range []int{0, 2} {
+		if _, hasError := batchResults[i]["error"]; hasError {
+			t.Errorf("item %d: unexpected error: %v", i, batchResults[i]["error"])
+		}
+		if _, hasPlaintext := batchResults[i]["plaintext"]; !hasPlaintext {
+			t.Errorf("item %d: missing plaintext", i)
+		}
+	}
+	if _, hasError := batchResults[1]["error"]; !hasError {
+		t.Errorf("item 1: expected error, got: %v", batchResults[1])
+	}
+	if _, hasPlaintext := batchResults[1]["plaintext"]; hasPlaintext {
+		t.Errorf("item 1: unexpected plaintext present")
+	}
+}
+
+func TestGPG_DecryptBatch_SignerKeyMismatch(t *testing.T) {
+	storage := &logical.InmemStorage{}
+	b := Backend()
+
+	_, err := b.HandleRequest(context.Background(), &logical.Request{
+		Storage:   storage,
+		Operation: logical.UpdateOperation,
+		Path:      "keys/test",
+		Data:      map[string]interface{}{"generate": false, "key": privateDecryptKey},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	resp, err := b.HandleRequest(context.Background(), &logical.Request{
+		Storage:   storage,
+		Operation: logical.UpdateOperation,
+		Path:      "decrypt/test",
+		Data: map[string]interface{}{
+			"format": "ascii-armor",
+			"batch_input": []interface{}{
+				map[string]interface{}{
+					"ciphertext": encryptedMessageASCIIArmored,
+					"signer_key": privateDecryptKey, // not the signer of this message
+				},
+			},
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if resp.IsError() {
+		t.Fatalf("expected no error response, got: %v", resp)
+	}
+
+	batchResults, ok := resp.Data["batch_results"].([]map[string]interface{})
+	if !ok {
+		t.Fatalf("expected batch_results to be []map[string]interface{}, got %T", resp.Data["batch_results"])
+	}
+	if len(batchResults) != 1 {
+		t.Fatalf("expected 1 batch result, got %d", len(batchResults))
+	}
+	if _, hasError := batchResults[0]["error"]; !hasError {
+		t.Errorf("item 0: expected error for signer key mismatch, got: %v", batchResults[0])
+	}
+	if _, hasPlaintext := batchResults[0]["plaintext"]; hasPlaintext {
+		t.Errorf("item 0: unexpected plaintext present")
+	}
+}
+
+func TestGPG_DecryptBatch_MissingCiphertext(t *testing.T) {
+	storage := &logical.InmemStorage{}
+	b := Backend()
+
+	_, err := b.HandleRequest(context.Background(), &logical.Request{
+		Storage:   storage,
+		Operation: logical.UpdateOperation,
+		Path:      "keys/test",
+		Data:      map[string]interface{}{"generate": false, "key": privateDecryptKey},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	resp, err := b.HandleRequest(context.Background(), &logical.Request{
+		Storage:   storage,
+		Operation: logical.UpdateOperation,
+		Path:      "decrypt/test",
+		Data: map[string]interface{}{
+			"format": "ascii-armor",
+			"batch_input": []interface{}{
+				map[string]interface{}{}, // no "ciphertext" key
+			},
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if resp.IsError() {
+		t.Fatalf("expected no error response, got: %v", resp)
+	}
+
+	batchResults, ok := resp.Data["batch_results"].([]map[string]interface{})
+	if !ok {
+		t.Fatalf("expected batch_results to be []map[string]interface{}, got %T", resp.Data["batch_results"])
+	}
+	if len(batchResults) != 1 {
+		t.Fatalf("expected 1 batch result, got %d", len(batchResults))
+	}
+	if _, hasError := batchResults[0]["error"]; !hasError {
+		t.Errorf("item 0: expected error for missing ciphertext, got: %v", batchResults[0])
+	}
+}
+
+func TestGPG_DecryptBatch_Empty(t *testing.T) {
+	storage := &logical.InmemStorage{}
+	b := Backend()
+
+	_, err := b.HandleRequest(context.Background(), &logical.Request{
+		Storage:   storage,
+		Operation: logical.UpdateOperation,
+		Path:      "keys/test",
+		Data:      map[string]interface{}{"generate": false, "key": privateDecryptKey},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	resp, err := b.HandleRequest(context.Background(), &logical.Request{
+		Storage:   storage,
+		Operation: logical.UpdateOperation,
+		Path:      "decrypt/test",
+		Data: map[string]interface{}{
+			"format":      "ascii-armor",
+			"batch_input": []interface{}{},
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if resp.IsError() {
+		t.Fatalf("expected no error response, got: %v", resp)
+	}
+
+	batchResults, ok := resp.Data["batch_results"].([]map[string]interface{})
+	if !ok {
+		t.Fatalf("expected batch_results to be []map[string]interface{}, got %T: %v", resp.Data["batch_results"], resp.Data["batch_results"])
+	}
+	if len(batchResults) != 0 {
+		t.Fatalf("expected 0 batch results, got %d", len(batchResults))
+	}
+}
+
+func TestGPG_DecryptBatch_RequestLevelBadFormat(t *testing.T) {
+	storage := &logical.InmemStorage{}
+	b := Backend()
+
+	_, err := b.HandleRequest(context.Background(), &logical.Request{
+		Storage:   storage,
+		Operation: logical.UpdateOperation,
+		Path:      "keys/test",
+		Data:      map[string]interface{}{"generate": false, "key": privateDecryptKey},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	resp, err := b.HandleRequest(context.Background(), &logical.Request{
+		Storage:   storage,
+		Operation: logical.UpdateOperation,
+		Path:      "decrypt/test",
+		Data: map[string]interface{}{
+			"format": "notexisting",
+			"batch_input": []interface{}{
+				map[string]interface{}{"ciphertext": encryptedMessageASCIIArmored},
+			},
+		},
+	})
+	if err != nil && err != logical.ErrInvalidRequest {
+		t.Fatal(err)
+	}
+	if resp == nil || !resp.IsError() {
+		t.Fatalf("expected error response, got: %v", resp)
+	}
+	if _, hasBatch := resp.Data["batch_results"]; hasBatch {
+		t.Errorf("expected no batch_results in error response")
+	}
+}
+
+func TestGPG_DecryptBatch_RequestLevelUnknownKey(t *testing.T) {
+	storage := &logical.InmemStorage{}
+	b := Backend()
+
+	resp, err := b.HandleRequest(context.Background(), &logical.Request{
+		Storage:   storage,
+		Operation: logical.UpdateOperation,
+		Path:      "decrypt/doesnotexist",
+		Data: map[string]interface{}{
+			"batch_input": []interface{}{
+				map[string]interface{}{"ciphertext": encryptedMessageASCIIArmored},
+			},
+		},
+	})
+	if err != nil && err != logical.ErrInvalidRequest {
+		t.Fatal(err)
+	}
+	if resp == nil || !resp.IsError() {
+		t.Fatalf("expected error response, got: %v", resp)
+	}
+	if _, hasBatch := resp.Data["batch_results"]; hasBatch {
+		t.Errorf("expected no batch_results in error response")
+	}
+}

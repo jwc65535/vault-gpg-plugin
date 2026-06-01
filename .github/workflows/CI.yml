@@ -25,6 +25,16 @@ jobs:
       - uses: codecov/codecov-action@e79a6962e0d4c0c17b229090214935d2e33f8354
         with:
           token: ${{ secrets.CODECOV_TOKEN }}
+  integration_tests:
+    runs-on: ubuntu-24.04
+    name: Integration Tests
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd
+      - uses: actions/setup-go@4a3601121dd01d1626a1e23e37211e3254c1c06c
+        with:
+          go-version: '^1.23.0'
+      - name: Integration Tests
+        run: go test -v -tags integration -timeout 120s ./gpg/
   static_analysis:
     runs-on: ubuntu-24.04
     name: Run static analysis and linting
