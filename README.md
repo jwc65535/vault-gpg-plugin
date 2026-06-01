@@ -10,6 +10,16 @@ As of today, the backend does not support encrypting data.
 This backend has similar use cases with the [transit secret backend](https://www.vaultproject.io/docs/secrets/transit)
 and the latter should be preferred if you do not need to interact with existing tools that are only GPG-aware.
 
+## Features
+
+- **Sign** data with a stored GPG key (detached signature, SHA-2 family hash algorithms)
+- **Verify** detached signatures
+- **Decrypt** GPG-encrypted messages, with optional signer verification
+- **Show session key** — extract the symmetric session key from an encrypted message
+- **Batch operations** — all four operations accept a `batch_input` array to process
+  multiple items in a single API call, following the same conventions as the Vault
+  transit secret backend
+
 ## Usage & setup
 
 This is a [Vault plugin](https://www.vaultproject.io/docs/internals/plugins.html), you need to have a working installation
@@ -30,3 +40,40 @@ $ cosign verify-blob <file> --bundle <file>.bundle \
 ```
 
 Once mounted in Vault, this plugin exposes [this HTTP API](docs/http-api.md).
+
+## Batch operations
+
+The `sign`, `verify`, `decrypt`, and `show-session-key` endpoints each accept an
+optional `batch_input` array. When present, the endpoint processes all items in a
+single request and returns a `batch_results` array at the same index positions.
+
+- A successful item carries its result field (`signature`, `valid`, `plaintext`, or
+  `session_key`).
+- A failed item carries only an `"error"` string — one item failing does not affect
+  the others.
+- Top-level parameters (`format`, `algorithm`) apply to every item in the batch.
+- Single-item requests are fully backward compatible; `batch_input` is optional.
+
+**Example — batch sign:**
+
+```
+$ curl \
+    --header "X-Vault-Token: ..." \
+    --request POST \
+    --data '{"batch_input":[{"input":"dGhlIHF1aWNrIGJyb3duIGZveA=="},{"input":"aGVsbG8gd29ybGQ="}]}' \
+    https://vault.example.com/v1/gpg/sign/my-key
+```
+
+```json
+{
+  "data": {
+    "batch_results": [
+      { "signature": "wsBc..." },
+      { "signature": "wsBc..." }
+    ]
+  }
+}
+```
+
+See the [HTTP API documentation](docs/http-api.md) for the full batch request and
+response schema for each operation.
