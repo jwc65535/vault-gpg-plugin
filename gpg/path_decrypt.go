@@ -173,6 +173,7 @@ func decryptOne(keyring openpgp.EntityList, ciphertext, format string, requireSi
 	}
 
 	if requireSignature && (!md.IsSigned || md.SignedBy == nil || md.SignatureError != nil) {
+		//nolint:ST1005 // capitalization matches the original upstream error string; changing it would break callers
 		return "", decryptSoftErr{fmt.Errorf("Signature is invalid or not present: %s", md.SignatureError)}
 	}
 
